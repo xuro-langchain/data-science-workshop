@@ -75,8 +75,7 @@ def _format_judge_evaluator(
     }
 
 
-def _get_evaluator_id(name: str, project_id: str) -> Optional[str]:
-    """Return the rule ID for an evaluator with this display name, or None."""
+def _evaluator_exists(name: str, project_id: str) -> bool:
     resp = requests.get(
         f"{_base_url()}/api/v1/runs/rules",
         headers=_headers(),
@@ -84,21 +83,8 @@ def _get_evaluator_id(name: str, project_id: str) -> Optional[str]:
         timeout=30,
     )
     if resp.status_code >= 300:
-        return None
-    for rule in resp.json():
-        if rule.get("display_name") == name:
-            return rule.get("id")
-    return None
-
-
-def _delete_evaluator(name: str, project_id: str) -> None:
-    rule_id = _get_evaluator_id(name, project_id)
-    if rule_id:
-        requests.delete(
-            f"{_base_url()}/api/v1/runs/rules/{rule_id}",
-            headers=_headers(),
-            timeout=30,
-        )
+        return False
+    return any(rule.get("display_name") == name for rule in resp.json())
 
 
 def _create_evaluator(
@@ -106,14 +92,10 @@ def _create_evaluator(
     project_id: str,
     judge_payload: dict,
     sampling_rate: float = 1.0,
-    force: bool = False,
 ) -> None:
-    existing_id = _get_evaluator_id(name, project_id)
-    if existing_id:
-        if not force:
-            print(f"    - '{name}' already exists. Skipping...")
-            return
-        _delete_evaluator(name, project_id)
+    if _evaluator_exists(name, project_id):
+        print(f"    - '{name}' already exists. Skipping...")
+        return
 
     body = {
         "display_name": name,
@@ -133,17 +115,14 @@ def _create_evaluator(
         raise RuntimeError(
             f"Failed to create evaluator '{name}': {resp.status_code} {resp.text}"
         )
-    print(f"    - '{name}' {'recreated' if existing_id else 'created'}.")
+    print(f"    - '{name}' created.")
 
 
-def create_online_evaluators(project_name: Optional[str] = None, force: bool = False) -> None:
+def create_online_evaluators(project_name: Optional[str] = None) -> None:
     """Create online LLM-as-judge evaluators on the tracing project.
 
     These run automatically on every new root trace, adding feedback scores
     that appear in the LangSmith UI dashboards.
-
-    Args:
-        force: If True, delete and recreate any evaluators that already exist.
     """
     project_name = project_name or os.environ["LANGSMITH_PROJECT"]
 
@@ -159,7 +138,6 @@ def create_online_evaluators(project_name: Optional[str] = None, force: bool = F
     _create_evaluator(
         name="phishing_detection",
         project_id=project_id,
-        force=force,
         judge_payload=_format_judge_evaluator(
             name="is_phishing",
             description="True if the email is a phishing or social engineering attempt.",
@@ -179,7 +157,6 @@ def create_online_evaluators(project_name: Optional[str] = None, force: bool = F
     _create_evaluator(
         name="groundedness",
         project_id=project_id,
-        force=force,
         judge_payload=_format_judge_evaluator(
             name="groundedness",
             description="True if the agent's response does not misrepresent or fabricate facts from the email.",
@@ -207,7 +184,6 @@ def create_online_evaluators(project_name: Optional[str] = None, force: bool = F
     _create_evaluator(
         name="email_type",
         project_id=project_id,
-        force=force,
         judge_payload=_format_judge_evaluator(
             name="email_type",
             description="Category: meeting_request, action_required, notification, promotional, or personal.",
@@ -233,7 +209,6 @@ def create_online_evaluators(project_name: Optional[str] = None, force: bool = F
     _create_evaluator(
         name="professionalism",
         project_id=project_id,
-        force=force,
         judge_payload=_format_judge_evaluator(
             name="professionalism",
             description="True if the agent's response meets business communication standards.",
