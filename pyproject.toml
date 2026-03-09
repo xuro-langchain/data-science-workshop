@@ -1,0 +1,16 @@
+[project]
+name = "data-science-workshop"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain",
+    "langchain-core",
+    "langchain-openai",
+    "langgraph",
+    "langsmith",
+    "pandas",
+    "pydantic",
+    "python-dotenv",
+    "requests",
+    "sqlalchemy",
+]
