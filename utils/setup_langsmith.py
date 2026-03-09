@@ -30,8 +30,8 @@ from utils.evaluators import create_online_evaluators
 def _project_has_traces(client: Client, project_name: str) -> bool:
     """Return True if the project exists and already has at least one trace."""
     try:
-        runs = list(client.list_runs(project_name=project_name, is_root=True, limit=1))
-        return len(runs) > 0
+        runs = list(client.list_runs(project_name=project_name, is_root=True, limit=2))
+        return len(runs) > 1
     except Exception:
         return False
 
@@ -45,15 +45,16 @@ def main(force_traces: bool = False):
     load_datasets()
     print()
 
-    if not force_traces and _project_has_traces(client, project_name):
-        print("Traces already exist — skipping trace generation.")
-        print("Run with --force-traces to generate a new batch anyway.")
-        create_online_evaluators()          # still idempotent
+    has_traces = _project_has_traces(client, project_name)  # check before touching anything
+
+    if force_traces or not has_traces:
+        create_traces(num_examples=1)   # bootstrap — creates the project
+        create_online_evaluators()      # attach rules to the now-existing project
+        time.sleep(3)                   # brief pause for rules to register
+        create_traces()                 # all 16 traces — evaluators fire on each one
     else:
-        create_traces(num_examples=1)       # one trace to create the project
-        create_online_evaluators()          # attach rules to the now-existing project
-        time.sleep(3)                       # brief pause for rules to register
-        create_traces()                     # all 16 traces — evaluators fire on each one
+        print("Traces already exist — skipping. Use --force-traces to generate more.")
+        create_online_evaluators()      # still idempotent — ensure rules exist
 
 
 if __name__ == "__main__":

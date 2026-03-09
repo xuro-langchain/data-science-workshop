@@ -1,4 +1,5 @@
 import sys
+import warnings
 from pathlib import Path
 
 # Allow running directly as a script from any directory
@@ -12,6 +13,7 @@ from utils.datasets import email_inputs, email_names
 
 
 def create_traces(num_examples: int = 16):
+    warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
     """Invoke the email assistant on dataset examples to generate LangSmith traces."""
     for idx, (email_input, name) in enumerate(zip(email_inputs, email_names)):
         if idx >= num_examples:
