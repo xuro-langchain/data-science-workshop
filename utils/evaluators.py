@@ -75,19 +75,30 @@ def _format_judge_evaluator(
     }
 
 
-def _evaluator_exists(name: str, project_id: str) -> bool:
+def _get_evaluator_id(name: str, project_id: str) -> Optional[str]:
+    """Return the rule ID for an evaluator with this display name, or None."""
     resp = requests.get(
         f"{_base_url()}/api/v1/runs/rules",
         headers=_headers(),
-        params={"session_id": project_id, "name_contains": name},
+        params={"session_id": project_id},
         timeout=30,
     )
     if resp.status_code >= 300:
-        return False
+        return None
     for rule in resp.json():
         if rule.get("display_name") == name:
-            return True
-    return False
+            return rule.get("id")
+    return None
+
+
+def _delete_evaluator(name: str, project_id: str) -> None:
+    rule_id = _get_evaluator_id(name, project_id)
+    if rule_id:
+        requests.delete(
+            f"{_base_url()}/api/v1/runs/rules/{rule_id}",
+            headers=_headers(),
+            timeout=30,
+        )
 
 
 def _create_evaluator(
@@ -95,10 +106,14 @@ def _create_evaluator(
     project_id: str,
     judge_payload: dict,
     sampling_rate: float = 1.0,
+    force: bool = False,
 ) -> None:
-    if _evaluator_exists(name, project_id):
-        print(f"    - '{name}' already exists. Skipping...")
-        return
+    existing_id = _get_evaluator_id(name, project_id)
+    if existing_id:
+        if not force:
+            print(f"    - '{name}' already exists. Skipping...")
+            return
+        _delete_evaluator(name, project_id)
 
     body = {
         "display_name": name,
@@ -118,14 +133,17 @@ def _create_evaluator(
         raise RuntimeError(
             f"Failed to create evaluator '{name}': {resp.status_code} {resp.text}"
         )
-    print(f"    - '{name}' created.")
+    print(f"    - '{name}' {'recreated' if existing_id else 'created'}.")
 
 
-def create_online_evaluators(project_name: Optional[str] = None) -> None:
-    """Create three online LLM-as-judge evaluators on the tracing project.
+def create_online_evaluators(project_name: Optional[str] = None, force: bool = False) -> None:
+    """Create online LLM-as-judge evaluators on the tracing project.
 
-    These run automatically on every new root trace in the project,
-    adding feedback scores that appear in the LangSmith UI dashboards.
+    These run automatically on every new root trace, adding feedback scores
+    that appear in the LangSmith UI dashboards.
+
+    Args:
+        force: If True, delete and recreate any evaluators that already exist.
     """
     project_name = project_name or os.environ["LANGSMITH_PROJECT"]
 
@@ -141,6 +159,7 @@ def create_online_evaluators(project_name: Optional[str] = None) -> None:
     _create_evaluator(
         name="phishing_detection",
         project_id=project_id,
+        force=force,
         judge_payload=_format_judge_evaluator(
             name="is_phishing",
             description="True if the email is a phishing or social engineering attempt.",
@@ -160,18 +179,26 @@ def create_online_evaluators(project_name: Optional[str] = None) -> None:
     _create_evaluator(
         name="groundedness",
         project_id=project_id,
+        force=force,
         judge_payload=_format_judge_evaluator(
             name="groundedness",
-            description="True if the agent's response only references facts present in the email and does not hallucinate.",
+            description="True if the agent's response does not misrepresent or fabricate facts from the email.",
             score_type="boolean",
             prompt=[
                 ["system", (
-                    "You are evaluating whether an AI email assistant's response is grounded "
-                    "in the original email. A grounded response only references facts "
-                    "present in the email — it does not fabricate names, dates, details, "
-                    "or commitments not mentioned by the sender."
+                    "You are evaluating whether an AI email assistant's response is factually "
+                    "accurate relative to the email it received.\n\n"
+                    "A response IS grounded if it:\n"
+                    "- Correctly identifies what the email is about\n"
+                    "- Adds reasonable professional context (e.g. 'I'll look into this', offering a timeline)\n"
+                    "- Proposes actions not explicitly requested but appropriate to the situation\n\n"
+                    "A response is NOT grounded only if it:\n"
+                    "- Fabricates specific facts stated in the email (wrong names, wrong deadlines, wrong details)\n"
+                    "- Misrepresents what the sender asked for\n"
+                    "- Invents information that contradicts the email\n\n"
+                    "Be generous: most reasonable professional responses should be grounded."
                 )],
-                ["human", "Email:\n{input}\n\nAgent response:\n{output}\n\nIs the response fully grounded in the email content?"],
+                ["human", "Email received:\n{input}\n\nAgent response:\n{output}\n\nIs the response factually grounded?"],
             ],
         ),
     )
@@ -180,16 +207,50 @@ def create_online_evaluators(project_name: Optional[str] = None) -> None:
     _create_evaluator(
         name="email_type",
         project_id=project_id,
+        force=force,
         judge_payload=_format_judge_evaluator(
             name="email_type",
-            description="Category of the email: meeting_request, action_required, notification, promotional, personal, or other.",
+            description="Category: meeting_request, action_required, notification, promotional, or personal.",
             score_type="string",
             prompt=[
                 ["system", (
-                    "You are classifying business emails by type. "
-                    "Choose exactly one of: meeting_request, action_required, notification, promotional, personal, other."
+                    "Classify the following email into exactly one of these categories:\n\n"
+                    "- meeting_request: asks to schedule, confirm, or discuss timing for a meeting or call\n"
+                    "- action_required: asks the recipient to do something — review a document, "
+                    "submit a report, answer a question, or investigate an issue\n"
+                    "- notification: FYI only — alerts, status updates, reminders, GitHub notifications, "
+                    "system alerts, subscription renewals — no direct action needed\n"
+                    "- promotional: marketing emails, newsletters, conference invitations, product announcements\n"
+                    "- personal: personal life matters such as medical appointments or family activities\n\n"
+                    "Reply with only the category name."
                 )],
-                ["human", "Classify the following email:\n\n{input}"],
+                ["human", "{input}"],
+            ],
+        ),
+    )
+
+    # ── 4. Professionalism ────────────────────────────────────────────────────
+    _create_evaluator(
+        name="professionalism",
+        project_id=project_id,
+        force=force,
+        judge_payload=_format_judge_evaluator(
+            name="professionalism",
+            description="True if the agent's response meets business communication standards.",
+            score_type="boolean",
+            prompt=[
+                ["system", (
+                    "You are evaluating the professional quality of an AI email assistant's response.\n\n"
+                    "A professional response:\n"
+                    "- Uses clear, polite, and respectful business language\n"
+                    "- Is appropriately concise without being curt\n"
+                    "- Addresses the email's purpose directly\n"
+                    "- Avoids slang, inappropriate informality, or rudeness\n\n"
+                    "For emails that are ignored or only notified (no response drafted), "
+                    "score as True — the decision itself can be professional even with no written reply.\n\n"
+                    "Be generous: most competent responses should pass."
+                )],
+                ["human", "Email received:\n{input}\n\nAgent response:\n{output}\n\nIs this a professional response?"],
             ],
         ),
     )
